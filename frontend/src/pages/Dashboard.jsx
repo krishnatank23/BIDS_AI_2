@@ -250,10 +250,10 @@ export default function Dashboard({ project, onBack }) {
                     isExpanded={expandedAgent === agentName}
                     onToggle={() => setExpandedAgent(expandedAgent === agentName ? null : agentName)}
                   />
-                  {/* Specialized Viewers */}
+                  {/* Logo Variations Viewer */}
                   {agentName === 'logo_generator' && output.output_json && (
                     <div className="animate-fade-in">
-                      <LogoViewer logoData={output.output_json} />
+                      <LogoViewer logoData={output.output_json} onRegenerate={handleRegenerate} />
                     </div>
                   )}
                 </div>
