@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from app.db.database import init_db
-from app.api.brand import router as brand_router
+from app.api.brand import router as brand_router  # ✅ Use database version
 from app.api.regenerate import router as regenerate_router
 
 load_dotenv()
@@ -20,11 +20,14 @@ load_dotenv()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: create DB tables. Shutdown: cleanup."""
+    # Initialize database
     await init_db()
     # Ensure export dirs exist
     os.makedirs("exports", exist_ok=True)
     os.makedirs("generated_logos", exist_ok=True)
+    print("✅ Application startup complete (database initialized)")
     yield
+    print("👋 Application shutdown")
 
 
 app = FastAPI(
@@ -40,12 +43,17 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         frontend_url,
-        "http://localhost:3000",
+        "http://localhost:4173",
         "http://localhost:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174",
+        "http://127.0.0.1:4173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://[::1]:5173",
     ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

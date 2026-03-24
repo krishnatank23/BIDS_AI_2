@@ -6,6 +6,14 @@ import asyncio
 from duckduckgo_search import DDGS
 
 
+# Keep DDGS and primp impersonation versions aligned to avoid noisy fallback warnings.
+DDGS._impersonates = ("chrome_145",)
+
+
+def _make_ddgs() -> DDGS:
+    return DDGS()
+
+
 async def web_search(query: str, num_results: int = 8) -> list[dict]:
     """
     Return a list of search result dicts with keys: title, link, snippet.
@@ -16,7 +24,7 @@ async def web_search(query: str, num_results: int = 8) -> list[dict]:
         loop = asyncio.get_event_loop()
         results = await loop.run_in_executor(
             None,
-            lambda: DDGS().text(query, max_results=num_results),
+            lambda: _make_ddgs().text(query, max_results=num_results),
         )
 
         return [

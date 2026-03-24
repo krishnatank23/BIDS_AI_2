@@ -24,35 +24,61 @@ const STEP_LABELS = {
 
 export default function Dashboard({ project, onBack }) {
   const [agentOutputs, setAgentOutputs] = useState({});
-  const [status, setStatus] = useState(project.status);
+  const [status, setStatus] = useState(project?.status || 'created');
   const [loading, setLoading] = useState(false);
   const [runningAll, setRunningAll] = useState(false);
   const [error, setError] = useState('');
   const [expandedAgent, setExpandedAgent] = useState(null);
 
+  // ✅ Ensure project ID is valid string
+  const projectId = project?.id?.toString?.() || project?.id;
+
   const fetchState = useCallback(async () => {
-    try {
-      const res = await getProject(project.id);
-      setAgentOutputs(res.data.agent_outputs || {});
-      setStatus(res.data.project?.status || 'created');
-    } catch (err) {
-      console.error('Failed to fetch project state', err);
+    if (!projectId) {
+      setError('No project ID available');
+      return;
     }
-  }, [project.id]);
+    try {
+      const res = await getProject(projectId);
+      setAgentOutputs(res.data?.agent_outputs || {});
+      setStatus(res.data?.project?.status || 'created');
+      setError(''); // Clear error on success
+    } catch (err) {
+      console.error('Failed to fetch project state:', err);
+      setError(err.response?.data?.detail || 'Failed to fetch project state');
+    }
+  }, [projectId]);
 
   useEffect(() => {
     fetchState();
   }, [fetchState]);
 
+  // ✅ NEW: Poll for progress while workflow is running
+  useEffect(() => {
+    if (status !== 'running') return;
+
+    const pollInterval = setInterval(async () => {
+      await fetchState();
+    }, 2000); // Poll every 2 seconds
+
+    return () => clearInterval(pollInterval);
+  }, [status, fetchState]);
+
   const handleNextStep = async () => {
     setLoading(true);
     setError('');
     try {
-      const res = await runNextStep(project.id);
-      setStatus(res.data.status);
-      await fetchState();
+      if (!projectId) {
+        throw new Error('No project ID');
+      }
+      const res = await runNextStep(projectId);
+      setStatus(res.data?.status || 'running');
+      // Start immediate polling
+      setTimeout(() => fetchState(), 500);
     } catch (err) {
-      setError(err.response?.data?.detail || 'Step execution failed');
+      const errorMsg = err.response?.data?.detail || err.message || 'Step execution failed';
+      setError(errorMsg);
+      console.error('Step error:', err);
     } finally {
       setLoading(false);
     }
@@ -62,11 +88,17 @@ export default function Dashboard({ project, onBack }) {
     setRunningAll(true);
     setError('');
     try {
-      const res = await runFullWorkflow(project.id);
-      setStatus(res.data.status);
-      await fetchState();
+      if (!projectId) {
+        throw new Error('No project ID');
+      }
+      const res = await runFullWorkflow(projectId);
+      setStatus(res.data?.status || 'running');
+      // Start immediate polling
+      setTimeout(() => fetchState(), 500);
     } catch (err) {
-      setError(err.response?.data?.detail || 'Workflow failed');
+      const errorMsg = err.response?.data?.detail || err.message || 'Workflow failed';
+      setError(errorMsg);
+      console.error('Workflow error:', err);
     } finally {
       setRunningAll(false);
     }
@@ -75,10 +107,15 @@ export default function Dashboard({ project, onBack }) {
   const handleRegenerate = async (agentName, feedback = '') => {
     try {
       setError('');
-      await regenerate(project.id, agentName, feedback);
+      if (!projectId) {
+        throw new Error('No project ID');
+      }
+      await regenerate(projectId, agentName, feedback);
       await fetchState();
     } catch (err) {
-      setError(err.response?.data?.detail || 'Regeneration failed');
+      const errorMsg = err.response?.data?.detail || err.message || 'Regeneration failed';
+      setError(errorMsg);
+      console.error('Regenerate error:', err);
     }
   };
 
@@ -118,11 +155,11 @@ export default function Dashboard({ project, onBack }) {
             <h1 className="text-3xl font-black bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent mb-3 uppercase tracking-tight">
               Brand Identity Project
             </h1>
-            <p className="text-xl text-white/70 leading-relaxed font-medium">{project.idea}</p>
+            <p className="text-xl text-white/70 leading-relaxed font-medium">{project?.idea || 'Loading...'}</p>
             <div className="flex items-center gap-4 mt-6 text-xs text-white/30">
-              <span>ID: <span className="font-mono text-white/50">{project.id}</span></span>
+              <span>ID: <span className="font-mono text-white/50">{projectId}</span></span>
               <span>•</span>
-              <span>Created: {new Date(project.created_at).toLocaleString()}</span>
+              <span>Created: {project?.created_at ? new Date(project.created_at).toLocaleString() : 'N/A'}</span>
             </div>
           </div>
 

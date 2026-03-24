@@ -217,8 +217,9 @@ async def run_full_workflow(db: AsyncSession, project: Project) -> WorkflowState
     ordered_steps = [0, 1, 3, 4, 5, 6, 7, 8, 9]
     for step in ordered_steps:
         state = await run_step(db, project, step, state)
+        # ✅ Commit after each step so frontend can see progress
+        await db.commit()
 
-    await db.commit()
     return state
 
 

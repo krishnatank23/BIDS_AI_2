@@ -3,7 +3,7 @@ API routes for brand identity creation and management.
 """
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -12,14 +12,12 @@ from app.db.models import Project, AgentOutput, BrandKit
 from app.schemas.brand_schema import (
     ProjectCreate,
     ProjectOut,
-    AgentOutputOut,
     WorkflowState,
 )
 from app.workflows.brand_graph import (
     run_full_workflow,
     run_step,
     build_state_from_db,
-    AGENT_SEQUENCE,
 )
 
 router = APIRouter(prefix="/api/brand", tags=["Brand"])
@@ -31,59 +29,182 @@ async def create_project(
     payload: ProjectCreate, db: AsyncSession = Depends(get_db)
 ):
     """Create a new brand identity project."""
-    project = Project(idea=payload.idea, user_id=payload.user_id)
-    db.add(project)
-    await db.flush()
-    await db.refresh(project)
-    return project
+    try:
+        project = Project(idea=payload.idea, user_id=payload.user_id)
+        db.add(project)
+        await db.commit()  # ✅ COMMIT so project persists
+        await db.refresh(project)  # Refresh after commit
+        return project
+    except Exception as e:
+        await db.rollback()  # Rollback on error
+        import traceback
+        print(f"ERROR creating project: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Run Full Workflow ─────────────────────────────────────────────────
+# ── Background Worker for Single Step ────────────────────────────────
+async def _run_step_background(project_id: UUID, step: int) -> None:
+    """Background task: runs a single step."""
+    from app.db.database import async_session_factory
+    
+    async with async_session_factory() as db:
+        project = await db.get(Project, project_id)
+        if not project:
+            return
+        
+        try:
+            # Validate that previous steps are complete
+            required_agents = {
+                0: [],
+                1: ["idea_discovery"],
+                3: ["idea_discovery", "market_research", "competitor_analysis"],
+                4: ["brand_strategy"],
+                5: ["brand_strategy", "naming"],
+                6: ["naming", "design_agent"],
+                7: ["brand_strategy", "naming", "design_agent"],
+                8: ["brand_strategy", "naming", "design_agent", "content_agent"],
+                9: ["idea_discovery", "market_research", "competitor_analysis", "brand_strategy", "naming", "design_agent", "content_agent", "guidelines_agent"],
+            }
+            
+            required = required_agents.get(step, [])
+            state = await build_state_from_db(db, project)
+            
+            for agent in required:
+                if getattr(state, agent, None) is None:
+                    print(f"⚠️  Cannot run step {step}: missing {agent} output")
+                    project.status = "error"
+                    await db.commit()
+                    return
+            
+            await run_step(db, project, step, state)
+            await db.commit()
+            print(f"✅ Step {step} completed for project {project_id}")
+        except Exception as e:
+            print(f"❌ ERROR in background step {step} for {project_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            # Update status to show error
+            project.status = "error"
+            try:
+                await db.commit()
+            except:
+                await db.rollback()
+
+
+# ── Background Worker for Full Workflow ───────────────────────────────
+async def _run_workflow_background(project_id: UUID) -> None:
+    """Background task: runs workflow end-to-end."""
+    from app.db.database import async_session_factory
+    
+    async with async_session_factory() as db:
+        project = await db.get(Project, project_id)
+        if not project:
+            return
+        
+        try:
+            print(f"🚀 Starting workflow for project {project_id}")
+            await run_full_workflow(db, project)
+            print(f"✅ Workflow completed for project {project_id}")
+        except Exception as e:
+            print(f"❌ ERROR in background workflow for {project_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            # Update status to show error
+            try:
+                project.status = "error"
+                await db.commit()
+            except:
+                await db.rollback()
+
+
+# ── Run Full Workflow (Non-Blocking) ────────────────────────────────
 @router.post("/project/{project_id}/run")
-async def run_workflow(project_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Run the entire brand identity pipeline for a project."""
-    project = await db.get(Project, project_id)
-    if not project:
-        raise HTTPException(404, "Project not found")
-    if project.status == "completed":
-        raise HTTPException(400, "Project workflow already completed")
+async def run_workflow(
+    project_id: UUID, 
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Fire-and-forget: Start the brand identity pipeline.
+    Returns immediately with current status.
+    Frontend should poll /api/brand/project/{project_id} for progress.
+    """
+    try:
+        project = await db.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if project.status == "completed":
+            raise HTTPException(status_code=400, detail="Project workflow already completed")
 
-    state = await run_full_workflow(db, project)
-    return {
-        "status": "completed",
-        "project_id": str(project_id),
-        "state": state.model_dump(),
-    }
+        # Update project status to 'running'
+        project.status = "running"
+        # Don't commit here - let get_db() dependency handle it
+
+        # Queue background task
+        background_tasks.add_task(_run_workflow_background, project_id)
+
+        return {
+            "status": "running",
+            "project_id": str(project_id),
+            "message": "Workflow started in background. Poll for progress."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR in run_workflow: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Run Next Step ─────────────────────────────────────────────────────
+# ── Run Next Step (Non-Blocking) ─────────────────────────────────────
 @router.post("/project/{project_id}/step")
-async def run_next_step(project_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Run the next step in the pipeline (for step-by-step approval)."""
-    project = await db.get(Project, project_id)
-    if not project:
-        raise HTTPException(404, "Project not found")
-    if project.status == "completed":
-        raise HTTPException(400, "Workflow already completed")
+async def run_next_step(
+    project_id: UUID, 
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Fire-and-forget: Run the next step in the pipeline.
+    Returns immediately with current step info.
+    Frontend should poll /api/brand/project/{project_id} for progress.
+    """
+    try:
+        project = await db.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if project.status == "completed":
+            raise HTTPException(status_code=400, detail="Workflow already completed")
 
-    current = project.current_step or 0
+        current = project.current_step or 0
 
-    # Map step numbers: step 1 runs parallel (1+2), then jump to 3
-    step_map = [0, 1, 3, 4, 5, 6, 7, 8, 9]
-    if current >= len(step_map):
-        raise HTTPException(400, "All steps completed")
+        # Map step numbers: step 1 runs parallel (1+2), then jump to 3
+        step_map = [0, 1, 3, 4, 5, 6, 7, 8, 9]
+        if current >= len(step_map):
+            raise HTTPException(status_code=400, detail="All steps completed")
 
-    step = step_map[current]
-    state = await build_state_from_db(db, project)
-    state = await run_step(db, project, step, state)
-    await db.commit()
+        step = step_map[current]
+        
+        # Update status and mark as running
+        project.status = "running"
+        # Don't commit here - let get_db() dependency handle it
+        
+        # Queue background task for the step
+        background_tasks.add_task(_run_step_background, project_id, step)
 
-    return {
-        "step_completed": step,
-        "next_step": current + 1 if current + 1 < len(step_map) else None,
-        "status": project.status,
-        "state": state.model_dump(),
-    }
+        return {
+            "status": "running",
+            "step_requested": step,
+            "message": f"Step {step} queued in background. Poll for progress."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR in run_next_step: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Get Project State ─────────────────────────────────────────────────

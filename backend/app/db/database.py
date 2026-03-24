@@ -36,7 +36,7 @@ async def get_db() -> AsyncSession:  # type: ignore[misc]
     async with async_session_factory() as session:
         try:
             yield session
-            await session.commit()
+            await session.commit()  # ✅ Auto-commit on success
         except Exception:
             await session.rollback()
             raise

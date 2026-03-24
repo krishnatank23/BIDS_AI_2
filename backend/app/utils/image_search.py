@@ -6,13 +6,21 @@ import asyncio
 from duckduckgo_search import DDGS
 
 
+# Keep DDGS and primp impersonation versions aligned to avoid noisy fallback warnings.
+DDGS._impersonates = ("chrome_145",)
+
+
+def _make_ddgs() -> DDGS:
+    return DDGS()
+
+
 async def image_search(query: str, num_results: int = 6) -> list[dict]:
     """Return list of image results with keys: title, imageUrl, link."""
     try:
         loop = asyncio.get_event_loop()
         results = await loop.run_in_executor(
             None,
-            lambda: DDGS().images(query, max_results=num_results),
+            lambda: _make_ddgs().images(query, max_results=num_results),
         )
 
         return [
